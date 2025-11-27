@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-it"
+version = "0.1.0"
+description = "Transform any FastAPI server into an MCP server"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "enzobjmendonca"}
+]
+dependencies = [
+    "fastapi>=0.100.0",
+    "httpx>=0.24.0",
+    "mcp>=0.1.0",
+    "pydantic>=2.0.0",
+]
+keywords = ["mcp", "fastapi", "server", "transformation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/enzobjmendonca/mcp-it"
+Repository = "https://github.com/enzobjmendonca/mcp-it"
+Issues = "https://github.com/enzobjmendonca/mcp-it/issues"
+
+[tool.setuptools]
+packages = ["mcpit"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+
