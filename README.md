@@ -2,7 +2,7 @@
 
 **Transform any FastAPI server into an MCP (Model Context Protocol) server.**
 
-`mcp-it` allows you to seamlessly convert your FastAPI routes into MCP tools. Decorate your FastAPI endpoints with `@mcp_it.mcp()` and your API becomes an MCP server that can be used with MCP-compatible clients.
+mcp-it allows you to seamlessly convert your FastAPI routes into MCP tools. Decorate your FastAPI endpoints with `@mcp_it.mcp()` and your API becomes an MCP server that can be used with MCP-compatible clients.
 
 ## Features
 
@@ -149,11 +149,10 @@ The main class for creating MCP servers from FastAPI routes.
 #### Constructor
 
 ```python
-MCPIt(name: str, version: str = "1.0.0", json_response: bool = True)
+MCPIt(name: str, json_response: bool = True)
 ```
 
 - **name**: Name of your MCP server
-- **version**: Version string (default: "1.0.0")
 - **json_response**: Whether to return JSON responses (default: True)
 
 #### Methods

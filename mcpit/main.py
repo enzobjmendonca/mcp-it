@@ -62,9 +62,8 @@ class AppProxyResponse(Response):
         await self.app(scope, receive, send)
 
 class MCPIt:
-    def __init__(self, name: str, version: str = "1.0.0", json_response: bool = True):
+    def __init__(self, name: str, json_response: bool = True):
         self.name = name
-        self.version = version
         self.json_response = json_response
         self._registry: List[Dict[str, Any]] = []
         
