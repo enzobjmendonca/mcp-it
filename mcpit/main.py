@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.dependencies.utils import get_dependant, get_flat_dependant, _should_embed_body_fields
 from fastapi.middleware.asyncexitstack import AsyncExitStackMiddleware
 import httpx
+from pydantic import create_model, Field, BaseModel
 from mcp.server.fastmcp import FastMCP
 from starlette.routing import Route
 from starlette.responses import Response
@@ -79,12 +80,203 @@ class MCPIt:
         """
         def decorator(func: Callable):
             self._registry.append({
+                "type": "local",
                 "func": func,
                 "mode": mode,
                 "kwargs": kwargs
             })
             return func
         return decorator
+
+    def proxy(self, url: str, method: str = "GET", mode: Literal['tool', 'resource', 'prompt'] = 'tool', **kwargs):
+        """
+        Decorator to register an external API endpoint as an MCP capability.
+        The decorated function's signature is used to define the tool's interface,
+        but the implementation is replaced by a proxy call to the specified URL.
+        """
+        def decorator(func: Callable):
+            self._registry.append({
+                "type": "proxy",
+                "func": func,
+                "mode": mode,
+                "url": url,
+                "method": method,
+                "kwargs": kwargs
+            })
+            return func
+        return decorator
+
+    def _parse_openapi_schema(self, schema: Dict[str, Any], name: str) -> Any:
+        """
+        Convert a simple OpenAPI schema to a Python type or Pydantic model.
+        """
+        schema_type = schema.get("type", "object")
+        
+        if schema_type == "string":
+            return str
+        elif schema_type == "integer":
+            return int
+        elif schema_type == "number":
+            return float
+        elif schema_type == "boolean":
+            return bool
+        elif schema_type == "array":
+            item_type = self._parse_openapi_schema(schema.get("items", {}), f"{name}Item")
+            return List[item_type]
+        elif schema_type == "object":
+            properties = schema.get("properties", {})
+            required = schema.get("required", [])
+            
+            fields = {}
+            for prop_name, prop_schema in properties.items():
+                prop_type = self._parse_openapi_schema(prop_schema, f"{name}_{prop_name}")
+                is_required = prop_name in required
+                
+                if is_required:
+                    fields[prop_name] = (prop_type, ...)
+                else:
+                    fields[prop_name] = (Optional[prop_type], None)
+            
+            if not fields:
+                return Dict[str, Any]
+                
+            return create_model(name, **fields)
+        
+        return Any
+
+    def bind_openapi(
+        self, 
+        openapi_url: str,
+        base_url: str = None,
+        include_paths: Optional[List[str]] = None, 
+        exclude_paths: Optional[List[str]] = None,
+        name_from_summary: bool = False
+    ):
+        """
+        Dynamically register tools from an OpenAPI specification.
+
+        Args:
+            openapi_url: The URL of the OpenAPI specification.
+            base_url: The base URL of the server. If not provided, the base URL  from the openapi specification will be used.
+            include_paths: The paths to include in the MCP server. If not provided, all paths will be included.
+            exclude_paths: The paths to exclude in the MCP server. If not provided, no paths will be excluded.
+            name_from_summary: If True, the name of the tool will be the summary of the operation. If False, the name will be the operationId.
+        """
+        try:
+            resp = httpx.get(openapi_url)
+            resp.raise_for_status()
+            spec = resp.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch OpenAPI spec from {openapi_url}: {e}")
+            return
+        
+        if not base_url:
+            base_url = "/".join(openapi_url.split("/")[:-1])
+
+        paths = spec.get("paths", {})
+        
+        for path, methods in paths.items():
+            # Simple filtering
+            if include_paths and not any(p in path for p in include_paths):
+                continue
+            if exclude_paths and any(p in path for p in exclude_paths):
+                continue
+
+            for method, op in methods.items():
+                if method.lower() not in ["get", "post", "put", "delete", "patch"]:
+                    continue
+                
+                op_id = op.get("operationId")
+                name = op.get("summary").lower().replace(" ", "_") if name_from_summary else op_id
+
+                description = op.get("description") or op.get("summary") or ""
+                
+                # Build parameters
+                func_params = []
+                param_structure = {}
+                
+                # 1. Path/Query params
+                for param in op.get("parameters", []):
+                    p_name = param.get("name")
+                    p_required = param.get("required", False)
+                    p_schema = param.get("schema", {})
+                    p_type = self._parse_openapi_schema(p_schema, f"{op_id}_{p_name}")
+                    p_in = param.get("in")
+                    
+                    if p_in in ["query", "path", "header", "cookie"]:
+                        param_structure[p_name] = p_in
+
+                    default = inspect.Parameter.empty if p_required else None
+                    
+                    func_params.append(
+                        inspect.Parameter(
+                            name=p_name,
+                            kind=inspect.Parameter.KEYWORD_ONLY,
+                            default=default,
+                            annotation=p_type
+                        )
+                    )
+
+                # 2. Request Body
+                request_body = op.get("requestBody", {})
+                content = request_body.get("content", {})
+                json_media = content.get("application/json", {})
+                
+                if json_media:
+                    schema = json_media.get("schema", {})
+                    
+                    # Let's try to flatten top-level properties if possible
+                    if schema.get("type") == "object" and "properties" in schema:
+                        body_model = self._parse_openapi_schema(schema, f"{op_id}Body")
+                        # Extract fields from the generated model
+                        for name, field_info in body_model.model_fields.items():
+                            param_structure[name] = "body"
+                            # Pydantic v2
+                            annotation = field_info.annotation
+                            default = field_info.default 
+                            # Check for PydanticUndefined or similar
+                            if field_info.is_required():
+                                default = inspect.Parameter.empty
+                            
+                            func_params.append(
+                                inspect.Parameter(
+                                    name=name,
+                                    kind=inspect.Parameter.KEYWORD_ONLY,
+                                    default=default,
+                                    annotation=annotation
+                                )
+                            )
+                    else:
+                        # Complex body or array, just pass as dict/Any called 'body'
+                        param_structure["body"] = "body"
+                        func_params.append(
+                            inspect.Parameter(
+                                name="body",
+                                kind=inspect.Parameter.KEYWORD_ONLY,
+                                default=inspect.Parameter.empty,
+                                annotation=Dict[str, Any]
+                            )
+                        )
+                
+                # Create the dummy function signature
+                sig = inspect.Signature(parameters=func_params)
+                
+                async def dummy_func(**kwargs): 
+                    pass
+                    
+                dummy_func.__name__ = name
+                dummy_func.__doc__ = description
+                dummy_func.__signature__ = sig
+                dummy_func.__annotations__ = {p.name: p.annotation for p in func_params}
+                
+                # Register
+                self.proxy(
+                    url=f"{base_url}{path}",
+                    method=method.upper(),
+                    name=name,
+                    description=description,
+                    param_structure=param_structure
+                )(dummy_func)
 
     def _find_route_for_func(self, router: APIRouter, func: Callable) -> Optional[Route]:
         """Find the FastAPI route corresponding to the decorated function."""
@@ -215,14 +407,117 @@ class MCPIt:
                 logger.error(f"Error in MCP internal call to {path}: {e}")
                 raise e
 
+    async def _external_proxy_call(self, url: str, method: str, params: Dict[str, Any], param_structure: Dict[str, str] = None) -> Any:
+        """
+        Make an external HTTP call to the proxied API.
+        """
+        # Retrieve headers from context
+        headers = request_context.get() or {}
+        filtered_headers = {
+            k: v for k, v in headers.items() 
+            if k.lower() not in ('host', 'content-length', 'content-type', 'connection', 'upgrade')
+        }
+        filtered_headers['X-MCP-Source'] = 'true'
+
+        # Basic heuristic: check if param name exists in URL -> path param
+        path_params = {}
+        query_params = {}
+        json_body = {}
+        
+        formatted_url = url
+        param_structure = param_structure or {}
+        
+        for key, value in params.items():
+            location = param_structure.get(key)
+
+            # If explicit location provided, use it
+            if location == 'path':
+                path_params[key] = value
+                formatted_url = formatted_url.replace(f"{{{key}}}", str(value))
+            elif location == 'query':
+                query_params[key] = value
+            elif location == 'body':
+                if hasattr(value, "model_dump"):
+                     json_body.update(value.model_dump())
+                elif isinstance(value, dict):
+                     json_body.update(value)
+                else:
+                     json_body[key] = value
+            
+            # Heuristic fallback
+            elif f"{{{key}}}" in formatted_url:
+                path_params[key] = value
+                formatted_url = formatted_url.replace(f"{{{key}}}", str(value))
+            elif method.upper() in ["GET", "DELETE"]:
+                query_params[key] = value
+            else:
+                # For POST/PUT, if it's a model, use it as body. If it's a primitive, use it as json field.
+                if hasattr(value, "model_dump"):
+                     # Merge model fields into body
+                     json_body.update(value.model_dump())
+                elif isinstance(value, dict):
+                     json_body.update(value)
+                else:
+                     json_body[key] = value
+        
+        async with httpx.AsyncClient() as client:
+            req_kwargs = {}
+            if query_params:
+                req_kwargs["params"] = query_params
+            if json_body:
+                req_kwargs["json"] = json_body
+
+            try:
+                response = await client.request(
+                    method=method,
+                    url=formatted_url,
+                    headers=filtered_headers,
+                    **req_kwargs
+                )
+                
+                if self.json_response:
+                    try:
+                        return response.json()
+                    except Exception:
+                        return response.text
+                return response.text
+            except Exception as e:
+                logger.error(f"Error in MCP proxy call to {url}: {e}")
+                raise e
+
     def build(self, router: APIRouter, transport: Literal['sse', 'streamable-http'] = 'streamable-http', mount_path: str = "/mcp"):
         """
         Build the MCP server by registering tools and mounting routes.
         """
         for item in self._registry:
-            # 1. Process Registry and Register Tools on FastMCP
+            item_type = item.get("type", "local")
             func, mode, kwargs = item['func'], item['mode'], item['kwargs']
             
+            if item_type == "proxy":
+                url = item['url']
+                method = item['method']
+                param_structure = kwargs.get('param_structure', {})
+                 
+                if mode == MCPMode.TOOL:
+                    tool_name = kwargs.get('name', func.__name__)
+                    tool_desc = kwargs.get('description', func.__doc__ or "")
+                    
+                    # Use the function's signature directly
+                    sig = inspect.signature(func)
+                    
+                    # Need to capture self, url, method in closure
+                    async def proxy_wrapper(_url=url, _method=method, _structure=param_structure, **call_params):
+                        return await self._external_proxy_call(_url, _method, call_params, _structure)
+                    
+                    proxy_wrapper.__doc__ = tool_desc
+                    proxy_wrapper.__name__ = tool_name
+                    proxy_wrapper.__signature__ = sig
+                    proxy_wrapper.__annotations__ = func.__annotations__
+                    
+                    self.fastmcp.tool(name=tool_name, description=tool_desc)(proxy_wrapper)
+                continue
+
+            # Local FastAPI Route Logic
             route = self._find_route_for_func(router, func)
             if not route:
                 logger.warning(f"Function {func.__name__} is decorated with @mcp but not registered as a FastAPI route. Skipping.")

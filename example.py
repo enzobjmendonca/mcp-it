@@ -4,7 +4,7 @@ from fastapi import FastAPI, Depends, APIRouter
 from typing import Annotated, Optional
 from pydantic import BaseModel
 from fastapi import Header
-from src.mcpit import MCPIt
+from mcpit import MCPIt
 from pydantic import Field
 
 # 1. Define your FastAPI application
@@ -53,8 +53,8 @@ class CalculationInput(BaseModel):
     a: float = Field(..., description="The first number.")
     b: float = Field(..., description="The second number.")
 
-@router.post("/add_complex")
-#@mcp_it.mcp(mode='tool', name="add_complex", description="Add two numbers using object input")
+@router.post("/complex_path/add_complex")
+@mcp_it.mcp(mode='tool', name="add_complex", description="Add two numbers using object input")
 def add_complex(input1: CalculationInput, input2: CalculationInput):
     """
     Adds two numbers provided in an input object.
@@ -62,7 +62,7 @@ def add_complex(input1: CalculationInput, input2: CalculationInput):
     return {"result": input1.a + input1.b + input2.a + input2.b}
 
 @router.post("/add_simple")
-#@mcp_it.mcp(mode='tool', name="add_simple", description="Add two numbers using a single object input")
+@mcp_it.mcp(mode='tool', name="add_simple", description="Add two numbers using a single object input")
 def add_simple(input: CalculationInput):
     """
     Adds two numbers provided in a single input object.
@@ -70,7 +70,7 @@ def add_simple(input: CalculationInput):
     return {"result": input.a + input.b}
 
 @router.post("/multiply")
-#@mcp_it.mcp(mode='tool')
+@mcp_it.mcp(mode='tool')
 def multiply(a: float, b: float):
     """
     Multiplies two numbers.
@@ -89,13 +89,13 @@ def multiply(a: float, b: float):
     )
 
 @router.get("/hello")
-#@mcp_it.mcp(mode='tool', description="Say hello")
+@mcp_it.mcp(mode='tool', description="Say hello")
 def hello():
     """Returns a simple greeting."""
     return {"message": "Hello from MCP!"}
 
 @router.get("/subtract_with_auth")
-#@mcp_it.mcp(mode='tool', description="Subtract two numbers with authentication")
+@mcp_it.mcp(mode='tool', description="Subtract two numbers with authentication")
 def subtract_with_auth(a: float, b: float, auth_result: bool = Depends(fake_auth_dependency)):
     """
     Subtracts two numbers with authentication.
@@ -114,10 +114,11 @@ def next_fibonacci(service: BasicServiceDep):
 # This creates endpoints at:
 #   GET  /mcp/sse      (SSE Connection)
 #   POST /mcp/messages (JSON-RPC Messages)
-mcp_it.build(router, 'streamable-http', mount_path="/mcp")
+#Comment this line to use this server as example for the target of the proxy server in example_proxy.py
+#mcp_it.build(router, 'streamable-http', mount_path="/mcp")
 
 app.include_router(router)
 if __name__ == "__main__":
     print("Starting Server...")
-    print("MCP Endpoint: http://localhost:8000/mcp")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("MCP Endpoint: http://localhost:8800/mcp")
+    uvicorn.run(app, host="0.0.0.0", port=8800)
