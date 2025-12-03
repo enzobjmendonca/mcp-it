@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.dependencies.utils import get_dependant, get_flat_dependant, _should_embed_body_fields
 from fastapi.middleware.asyncexitstack import AsyncExitStackMiddleware
 import httpx
-from pydantic import create_model, Field, BaseModel
+from pydantic import create_model
 from mcp.server.fastmcp import FastMCP
 from starlette.routing import Route
 from starlette.responses import Response
@@ -337,7 +337,39 @@ class MCPIt:
         Make an in-process call to the FastAPI app using ASGITransport.
         Splits params into query/body based on route definition.
         """
-        transport = httpx.ASGITransport(app=AsyncExitStackMiddleware(router))
+        # Replace path parameters in the URL
+        formatted_path = path
+        for key, value in params.items():
+            if param_structure.get(key) == 'path':
+                formatted_path = formatted_path.replace(f"{{{key}}}", str(value))
+        
+        # Handle empty path routes: map "" to "/" for ASGITransport compatibility
+        # When route has path="" (regex ^$), ASGI requires "/" but route expects ""
+        # Solution: Create a temporary router with "/" route mapped to the same endpoint
+        mapped_router = router
+        
+        if not formatted_path or formatted_path == "":
+            # Check if any route in the router expects empty path
+            for route in router.routes:
+                if (hasattr(route, 'methods') and method.upper() in route.methods and 
+                    hasattr(route, 'path') and route.path == "" and
+                    hasattr(route, 'path_regex') and route.path_regex.pattern == "^$"):
+                    # Found an empty path route - create a mapped router
+                    mapped_router = APIRouter()
+                    # Copy all routes from original router
+                    for r in router.routes:
+                        mapped_router.routes.append(r)
+                    # Add a "/" route that points to the same endpoint
+                    mapped_router.add_api_route(
+                        "/",
+                        route.endpoint,
+                        methods=list(route.methods),
+                        name=getattr(route, 'name', None)
+                    )
+                    formatted_path = "/"  # Use "/" for the call
+                    break
+        
+        transport = httpx.ASGITransport(app=AsyncExitStackMiddleware(mapped_router))
         base_url = "http://mcp-internal"
         
         # Retrieve headers from context
@@ -371,11 +403,6 @@ class MCPIt:
                 else:
                     body_params[key] = value
 
-        # Replace path parameters in the URL
-        formatted_path = path
-        for key, value in path_params.items():
-            formatted_path = formatted_path.replace(f"{{{key}}}", str(value))
-
         async with httpx.AsyncClient(transport=transport, base_url=base_url) as client:
             req_kwargs = {}
             if query_params:
@@ -390,9 +417,10 @@ class MCPIt:
                      req_kwargs["json"] = {key: value.model_dump() if hasattr(value, "model_dump") else value for key, value in body_params.items()}
 
             try:
+                url = f"{base_url}{formatted_path}"
                 response = await client.request(
                     method=method,
-                    url=formatted_path,
+                    url=url,
                     headers=filtered_headers,
                     **req_kwargs
                 )
@@ -588,7 +616,6 @@ class MCPIt:
             # Mutate the scope to simulate a Mount
             # We strip the mount_path from the path, and append it to the root_path
             path_suffix = request.path_params.get("path", "")
-        
             request.scope['path'] = "/" + path_suffix
             request.scope['root_path'] = request.scope.get('root_path', '') + mount_path
             
