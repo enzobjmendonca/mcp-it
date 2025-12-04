@@ -12,6 +12,7 @@ from starlette.responses import Response
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 import inspect
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +296,15 @@ class MCPIt:
              - A list of flattened, relevant parameters (ModelField objects).
         """
         try:
+            # Extract path parameter names directly from the route path template
+            # This handles formats like {param}, {param:type}, {param:uuid}, etc.
+            path_param_names_from_template = set()
+            if route.path:
+                # Match patterns like {param} or {param:type} in the path
+                path_param_pattern = r'\{([^}:]+)(?::[^}]+)?\}'
+                matches = re.findall(path_param_pattern, route.path)
+                path_param_names_from_template = set(matches)
+            
             dependant = get_dependant(path=route.path, call=route.endpoint)
             flat_dependant = get_flat_dependant(dependant)
             
@@ -302,13 +312,20 @@ class MCPIt:
             single_body_param = None
             relevant_params = []
             
+            # First, map path parameters (from template extraction)
             for param in flat_dependant.path_params:
                 param_map[param.name] = 'path'
                 relevant_params.append(param)
-                
+            
+            # Process query params, but override if they're actually path params
             for param in flat_dependant.query_params:
-                param_map[param.name] = 'query'
-                relevant_params.append(param)
+                if param.name in path_param_names_from_template:
+                    # This is actually a path parameter, not a query parameter!
+                    param_map[param.name] = 'path'
+                    relevant_params.append(param)
+                else:
+                    param_map[param.name] = 'query'
+                    relevant_params.append(param)
                 
             if flat_dependant.body_params:
                 # Not cool to use the internal function, but better than reimplementing everything and risk missing further changes.
@@ -322,12 +339,13 @@ class MCPIt:
             return param_map, single_body_param, relevant_params
         except Exception as e:
             logger.warning(f"Failed to analyze route params for {route.path}: {e}")
+            logger.exception(e)
             return {}, None, []
 
     async def _internal_proxy_call(
         self, 
         router: APIRouter, 
-        path: str, 
+        route: Route, 
         method: str, 
         params: Dict[str, Any], 
         param_structure: Dict[str, str],
@@ -337,11 +355,25 @@ class MCPIt:
         Make an in-process call to the FastAPI app using ASGITransport.
         Splits params into query/body based on route definition.
         """
-        # Replace path parameters in the URL
-        formatted_path = path
-        for key, value in params.items():
-            if param_structure.get(key) == 'path':
-                formatted_path = formatted_path.replace(f"{{{key}}}", str(value))
+        # Extract path parameters
+        path_params_dict = {key: value for key, value in params.items() 
+                           if param_structure.get(key) == 'path'}
+        
+        # Use Starlette's built-in url_path_for to replace path parameters
+        if path_params_dict and hasattr(route, 'url_path_for') and hasattr(route, 'name'):
+            try:
+                formatted_path = str(route.url_path_for(route.name, **path_params_dict))
+            except Exception as e:
+                logger.warning(f"Failed to use url_path_for for route {route.path}: {e}. Falling back to manual replacement.")
+                # Fallback to manual replacement using regex
+                formatted_path = route.path
+                for key, value in path_params_dict.items():
+                    # Replace {key:type} or {key} patterns with the actual value
+                    # This handles any type annotation (uuid, int, str, etc.)
+                    pattern = re.compile(rf'\{{{re.escape(key)}(?::[^}}]+)?\}}')
+                    formatted_path = pattern.sub(str(value), formatted_path)
+        else:
+            formatted_path = route.path
         
         # Handle empty path routes: map "" to "/" for ASGITransport compatibility
         # When route has path="" (regex ^$), ASGI requires "/" but route expects ""
@@ -349,25 +381,22 @@ class MCPIt:
         mapped_router = router
         
         if not formatted_path or formatted_path == "":
-            # Check if any route in the router expects empty path
-            for route in router.routes:
-                if (hasattr(route, 'methods') and method.upper() in route.methods and 
-                    hasattr(route, 'path') and route.path == "" and
-                    hasattr(route, 'path_regex') and route.path_regex.pattern == "^$"):
-                    # Found an empty path route - create a mapped router
-                    mapped_router = APIRouter()
-                    # Copy all routes from original router
-                    for r in router.routes:
-                        mapped_router.routes.append(r)
-                    # Add a "/" route that points to the same endpoint
-                    mapped_router.add_api_route(
-                        "/",
-                        route.endpoint,
-                        methods=list(route.methods),
-                        name=getattr(route, 'name', None)
-                    )
-                    formatted_path = "/"  # Use "/" for the call
-                    break
+            # Check if the route expects empty path
+            if (hasattr(route, 'path') and route.path == "" and
+                hasattr(route, 'path_regex') and route.path_regex.pattern == "^$"):
+                # Found an empty path route - create a mapped router
+                mapped_router = APIRouter()
+                # Copy all routes from original router
+                for r in router.routes:
+                    mapped_router.routes.append(r)
+                # Add a "/" route that points to the same endpoint
+                mapped_router.add_api_route(
+                    "/",
+                    route.endpoint,
+                    methods=list(route.methods),
+                    name=getattr(route, 'name', None)
+                )
+                formatted_path = "/"  # Use "/" for the call
         
         transport = httpx.ASGITransport(app=AsyncExitStackMiddleware(mapped_router))
         base_url = "http://mcp-internal"
@@ -403,11 +432,6 @@ class MCPIt:
                 else:
                     body_params[key] = value
 
-        # Replace path parameters in the URL
-        formatted_path = path
-        for key, value in path_params.items():
-            formatted_path = formatted_path.replace(f"{{{key}}}", str(value))
-
         async with httpx.AsyncClient(transport=transport, base_url=base_url) as client:
             req_kwargs = {}
             if query_params:
@@ -436,7 +460,7 @@ class MCPIt:
                         return response.text
                 return response.text
             except Exception as e:
-                logger.error(f"Error in MCP internal call to {path}: {e}")
+                logger.error(f"Error in MCP internal call to {route.path}: {e}")
                 raise e
 
     async def _external_proxy_call(self, url: str, method: str, params: Dict[str, Any], param_structure: Dict[str, str] = None) -> Any:
@@ -588,7 +612,7 @@ class MCPIt:
                         # Internally call the actual FastAPI route using ASGITransport.
                         return await self._internal_proxy_call(
                             router=current_router,
-                            path=current_route.path,
+                            route=current_route,
                             method=list(current_route.methods)[0] if current_route.methods else "GET",
                             params=call_params,
                             param_structure=current_structure,
