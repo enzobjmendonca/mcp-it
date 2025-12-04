@@ -403,6 +403,11 @@ class MCPIt:
                 else:
                     body_params[key] = value
 
+        # Replace path parameters in the URL
+        formatted_path = path
+        for key, value in path_params.items():
+            formatted_path = formatted_path.replace(f"{{{key}}}", str(value))
+
         async with httpx.AsyncClient(transport=transport, base_url=base_url) as client:
             req_kwargs = {}
             if query_params:
@@ -417,10 +422,9 @@ class MCPIt:
                      req_kwargs["json"] = {key: value.model_dump() if hasattr(value, "model_dump") else value for key, value in body_params.items()}
 
             try:
-                url = f"{base_url}{formatted_path}"
                 response = await client.request(
                     method=method,
-                    url=url,
+                    url=formatted_path,
                     headers=filtered_headers,
                     **req_kwargs
                 )
