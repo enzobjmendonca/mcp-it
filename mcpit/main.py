@@ -439,11 +439,14 @@ class MCPIt:
             if body_params:
                 # If we identified a single body param that shouldn't be embedded/wrapped
                 if single_body_param and len(body_params) == 1 and single_body_param in body_params:
-                     val = body_params[single_body_param]
-                     # If it's a Pydantic model, dump it. If it's a dict or primitive, use as is.
-                     req_kwargs["json"] = val.model_dump() if hasattr(val, "model_dump") else val
+                    val = body_params[single_body_param]
+                    # If it's a Pydantic model, dump it. If it's a dict or primitive, use as is.
+                    if isinstance(val, list):
+                        req_kwargs["json"] = [item.model_dump() if hasattr(item, "model_dump") else item for item in val]
+                    else:
+                        req_kwargs["json"] = val.model_dump() if hasattr(val, "model_dump") else val
                 else:
-                     req_kwargs["json"] = {key: value.model_dump() if hasattr(value, "model_dump") else value for key, value in body_params.items()}
+                    req_kwargs["json"] = {key: value.model_dump() if hasattr(value, "model_dump") else value for key, value in body_params.items()}
 
             try:
                 response = await client.request(
@@ -461,6 +464,8 @@ class MCPIt:
                 return response.text
             except Exception as e:
                 logger.error(f"Error in MCP internal call to {route.path}: {e}")
+                import traceback
+                traceback.print_exc()
                 raise e
 
     async def _external_proxy_call(self, url: str, method: str, params: Dict[str, Any], param_structure: Dict[str, str] = None) -> Any:
@@ -522,7 +527,7 @@ class MCPIt:
                 req_kwargs["params"] = query_params
             if json_body:
                 req_kwargs["json"] = json_body
-
+            
             try:
                 response = await client.request(
                     method=method,
